@@ -1,11 +1,11 @@
 from flask import Flask, request
 import myInfo as inf
 import requests as req
-from copy import deepcopy
 import checkRange as cr
 import logging
 import multiprocessing as mp
 import sys
+import json
 
 def on_success(r):
     if r.status_code == 200:
@@ -100,10 +100,14 @@ def insert():
         receivedPort = request.args.get("port")
 
         if cr.inMyRange(receivedHash, myRange):
-            data[receivedHash][receivedKey] = receivedData
+            if receivedHash in data:
+                data[receivedHash][receivedKey] = receivedData
+            else:
+                data[receivedHash]={}
+                data[receivedHash][receivedKey] = receivedData
 
             pool.apply_async(req.patch,["http://"+receivedIP + ":" + receivedPort + '/insert'],
-                             {"params":{"key": receivedKey, "data": "Data sucessfully installed"}})
+                             {"data":{"key": receivedKey, "data": "Data sucessfully installed"}})
 
             return {"respons": 'Node Contacted'}
 
@@ -116,7 +120,7 @@ def insert():
     elif request.method == 'PATCH':
 
         dataReceived = request.form.to_dict()
-        print("For Key = " + dataReceived["Key"] + ":\n" + dataReceived["data"])
+        print("For Key = " + dataReceived["key"] + ":\n" + dataReceived["data"])
 
         return {"respons": "Message Delivered"}
 
@@ -134,12 +138,12 @@ def delete():
 
             del data[receivedHash][receivedKey]
 
-            pool.apply_async(req.delete, ["http://"+receivedIP + ":" + receivedPort + '/delete'], {"params":{"key": receivedKey, "data": "Data sucessfully deleted"}})
+            pool.apply_async(req.patch, ["http://"+receivedIP + ":" + receivedPort + '/delete'], {"data":{"key": receivedKey, "data": "Data sucessfully deleted"}})
 
             return {"respons": 'Node Contacted'}
 
         else:
-            pool.apply_async(req.post,["http://"+nextIP + ":" + nextPort + '/delete'],
+            pool.apply_async(req.delete,["http://"+nextIP + ":" + nextPort + '/delete'],
                              {"params":{"ip": receivedIP, "port": receivedPort, "hash": receivedHash, "key": receivedKey}})
 
             return {"respons": "Message Forwarded"}
@@ -147,7 +151,7 @@ def delete():
     elif request.method == 'PATCH':
 
         dataReceived = request.form.to_dict()
-        print("For Key = " + dataReceived["Key"] + ":\n" + dataReceived["data"])
+        print("For Key = " + dataReceived["key"] + ":\n" + dataReceived["data"])
 
         return {"respons": "Message Delivered"}
 
@@ -170,13 +174,18 @@ def changePrev():
 
     receivedData = request.form.to_dict()
 
-    myRange = receivedData["range"]
+    myRange = int(receivedData["range"])
     prevIP = receivedData["ip"]
     prevPort = receivedData["port"]
 
     for i in receivedData["data"]:
+        if i not in data:
+            data[i]={}
         for j in receivedData["data"][i]:
             data[i][j] = receivedData["data"][i][j]
+
+    print("My new prev " + prevIP + ":" + prevPort)
+    print("My new range " + str(myRange))
 
     return {"respons":"Data Received"}
 
@@ -200,16 +209,30 @@ def newNode():
 
         if cr.inMyRange(receivedHash, myRange):
 
-            myNewRange = (request.args.get("hash")+1)%(inf.numberOfNodes)
+            myNewRange = (int(receivedHash)+1)%(inf.numberOfNodes)
             dataToSend={}
 
-            for i in range(myRange,myNewRange):
-                dataToSend[i]=data[i]
-                del data[i]
+            if myNewRange > myRange:
+                for i in range(myRange,myNewRange):
+                    if str(i) in data:
+                        dataToSend[str(i)]=data[str(i)]
+                        del data[str(i)]
+            else:
+                for i in range(myNewRange):
+                    if str(i) in data:
+                        dataToSend[str(i)]=data[str(i)]
+                        del data[str(i)]
+                for i in range(myRange,inf.numberOfNodes):
+                    if str(i) in data:
+                        dataToSend[str(i)]=data[str(i)]
+                        del data[str(i)]
+
+            print("Data to send: ")
+            print(dataToSend)
 
             pool.apply_async(req.post,["http://"+receivedIP + ":" + receivedPort + '/newNode'],
-                             {"data":{"nextIp": inf.myPrivateIP, "nextPort": inf.myPort, "prevIp": prevIP, "prevPort": prevPort,
-                            "range": myRange, "data": dataToSend}})
+                             {"data":{"nextIP": inf.myPrivateIP, "nextPort": inf.myPort, "prevIP": prevIP, "prevPort": prevPort,
+                            "range": myRange, "data": json.dumps(dataToSend)}})
 
             pool.apply_async(req.post,["http://"+prevIP + ":" + prevPort + '/changeNext'],
                                 {"data":{"ip": receivedIP, "port": receivedPort}})
@@ -229,12 +252,19 @@ def newNode():
     elif request.method == "POST":
         paramsReceived = request.form.to_dict()
 
-        myRange = paramsReceived["range"]
+        myRange = int(paramsReceived["range"])
         prevIP = paramsReceived["prevIP"]
         prevPort = paramsReceived["prevPort"]
         nextIP = paramsReceived["nextIP"]
         nextPort = paramsReceived["nextPort"]
-        data = deepcopy(paramsReceived["data"])
+        tempData = paramsReceived["data"]
+        print(tempData)
+        data = json.loads(tempData)
+        print(data)
+
+        print("My new next " + nextIP + ":" + nextPort)
+        print("My new prev " + prevIP + ":" + prevPort)
+        print("My new range " + str(myRange))
 
         return {"respons":"Variables have been Updated"}
 
@@ -249,11 +279,10 @@ def changeNext():
     nextIP = paramsReceived["ip"]
     nextPort = paramsReceived["port"]
 
+    print("My new next " + nextIP + ":" + nextPort)
+
     return {"respons":"Next has been Changed"}
 
 if __name__ == '__main__':
-    pool = mp.Pool(10)
-    app.run(port=inf.myPort,debug = True)
-    if inf.myPrivateIP != inf.mainNodeIP:
-        print("hello")
-        pool.apply_async(req.get,["http://"+inf.mainNodeIP+":"+inf.mainNodePort+'/newNode'], {"params":{"ip":inf.myPrivateIP,"port":inf.myPort,"hash": inf.myHash}})
+    pool = mp.Pool(4)
+    app.run(host="0.0.0.0", port=inf.myPort,debug = True)
